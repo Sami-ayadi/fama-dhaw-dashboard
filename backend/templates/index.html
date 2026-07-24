@@ -676,19 +676,24 @@ async function updateHourly() {
 // ─── Forecast ──────────────────────────────────────
 async function updateForecast() {
     try {
-        const data = await fetchJSON('/api/forecast?zone=Menzel%20Chaker');
+        const zoneSelect = document.getElementById('zoneSelector');
+        let selectedZone = zoneSelect.value || 'Route Menzel Chaker';
+        
+        // Si la zone contient "Chargement", on force Menzel Chaker
+        if (selectedZone.includes('Chargement')) selectedZone = 'Route Menzel Chaker';
 
-        // MC Status
+        const data = await fetchJSON(`/api/forecast?zone=${encodeURIComponent(selectedZone)}`);
+
+        // Statut de la zone (basé sur la dernière observation réelle)
         const mcEl = document.getElementById('mcStatus');
-        const statsData = await fetchJSON('/api/stats');
-        const mc = statsData.menzel_chaker;
-        if (mc) {
-            mcEl.className = `mc-status ${mc.is_cut ? 'cut' : 'ok'}`;
-            mcEl.innerHTML = `<div class="status-dot"></div><span>${mc.name} : ${mc.is_cut ? 'COUPÉE' : 'OK'} (${mc.reports} signalements)</span>`;
-        } else {
-            mcEl.className = 'mc-status ok';
-            mcEl.innerHTML = '<div class="status-dot"></div><span>Route Menzel Chaker : non trouvée dans les données</span>';
-        }
+        const lastObs = data.observed && data.observed.length > 0 ? data.observed[data.observed.length - 1] : null;
+        const isCut = lastObs ? lastObs.value === 1 : false;
+        
+        mcEl.className = `mc-status ${isCut ? 'cut' : 'ok'}`;
+        mcEl.innerHTML = `<div class="status-dot"></div><span>${selectedZone} : ${isCut ? 'COUPÉE' : 'OK'}</span>`;
+
+        // Mettre à jour les infos du modèle
+        document.getElementById('modelInfo').textContent = data.model_info || 'Random Forest';
 
         // Metrics
         document.getElementById('fmCutHours').textContent = (data.cut_hours_24h ?? '--') + 'h';
@@ -705,7 +710,6 @@ async function updateForecast() {
         const allLabels = [...observed.map(x => formatHourLabel(x.time)), ...forecast.map(x => formatHourLabel(x.time))];
         const obsValues = [...observed.map(x => x.value), ...forecast.map(() => null)];
         const foreValues = [...observed.map(() => null), ...forecast.map(x => x.value)];
-        const ewmaValues = [...observed.map(x => x.ewma), ...forecast.map(() => null)];
 
         if (charts.forecast) charts.forecast.destroy();
         charts.forecast = new Chart(document.getElementById('chartForecast'), {
@@ -714,8 +718,7 @@ async function updateForecast() {
                 labels: allLabels,
                 datasets: [
                     { label: 'Observé', data: obsValues, borderColor: '#3b82f6', backgroundColor: 'rgba(59,130,246,0.1)', fill: true, tension: 0.3, pointRadius: 2, spanGaps: false },
-                    { label: 'EWMA', data: ewmaValues, borderColor: '#f5c518', borderDash: [4,4], tension: 0.3, pointRadius: 0, spanGaps: false },
-                    { label: 'Prévu', data: foreValues, borderColor: '#e8392b', borderDash: [6,3], backgroundColor: 'rgba(232,57,43,0.08)', fill: true, tension: 0.3, pointRadius: 3, pointStyle: 'triangle', spanGaps: false }
+                    { label: 'Prévu (ML)', data: foreValues, borderColor: '#e8392b', borderDash: [6,3], backgroundColor: 'rgba(232,57,43,0.08)', fill: true, tension: 0.3, pointRadius: 3, pointStyle: 'triangle', spanGaps: false }
                 ]
             },
             options: {
@@ -727,6 +730,34 @@ async function updateForecast() {
     } catch (e) { console.error('Forecast error:', e); }
 }
 
+// ─── Populate Zone Selector ───────────────────────
+async function populateZones() {
+    try {
+        const data = await fetchJSON('/api/zones');
+        const select = document.getElementById('zoneSelector');
+        const currentVal = select.value;
+        select.innerHTML = '';
+        
+        // Trier les zones par ordre alphabétique
+        const zones = data.zones.sort((a, b) => a.name.localeCompare(b.name));
+        
+        zones.forEach(z => {
+            const opt = document.createElement('option');
+            opt.value = z.name;
+            opt.textContent = z.name;
+            select.appendChild(opt);
+        });
+
+        // Sélectionner Menzel Chaker par défaut si présent
+        if (zones.some(z => z.name === 'Route Menzel Chaker')) {
+            select.value = 'Route Menzel Chaker';
+        } else if (currentVal && !currentVal.includes('Chargement')) {
+            select.value = currentVal;
+        }
+    } catch (e) {
+        console.error('Populate zones error:', e);
+    }
+}
 // ─── Report ────────────────────────────────────────
 async function updateReport() {
     try {
@@ -798,6 +829,7 @@ async function refreshAll() {
     updateHeatmap();
     updateTopRegions();
     updateHourly();
+    populateZones();
     updateForecast();
     updateReport();
     updateDebug();

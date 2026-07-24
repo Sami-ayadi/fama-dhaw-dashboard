@@ -2,9 +2,8 @@ services:
   - type: web
     name: famma-dhaw-monitor
     runtime: python
-    plan: free
-    buildCommand: "pip install -r backend/requirements.txt"
-    startCommand: "cd backend && python app.py"
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn server:app --workers 1 --threads 4 --timeout 120
     envVars:
       - key: PYTHON_VERSION
-        value: 3.11.0
+        value: 3.11.9

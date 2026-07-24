@@ -1,0 +1,22 @@
+[
+  {
+    "method": "GET",
+    "url": "https://famma-dhaw.com/",
+    "resource_type": "document"
+  },
+  {
+    "method": "GET",
+    "url": "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.110.8/dist/umd/supabase.js",
+    "resource_type": "script"
+  },
+  {
+    "method": "GET",
+    "url": "https://njfulpklvqezflxiozhn.supabase.co/rest/v1/platform_stats?select=total_reports",
+    "resource_type": "fetch"
+  },
+  {
+    "method": "GET",
+    "url": "https://njfulpklvqezflxiozhn.supabase.co/rest/v1/zone_board_weighted?select=*",
+    "resource_type": "fetch"
+  }
+]

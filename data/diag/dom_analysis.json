@@ -1,0 +1,55 @@
+{
+  "tags": {
+    "div": 1505,
+    "span": 1122,
+    "li": 0,
+    "tr": 0,
+    "td": 0,
+    "a": 371,
+    "button": 1119,
+    "svg": 0,
+    "path": 0,
+    "circle": 0,
+    "marker": 0
+  },
+  "suggestive": [
+    {
+      "selector": "[class*=\"zone\"]",
+      "count": 371,
+      "samples": [
+        {
+          "tag": "DIV",
+          "text": "Aïn Zaghouan🔌 83 · 💡 39 · il y a 20s⛔ Coupé\n      \n      ›\n    \n    \n      \n        🔌 Pas de lumi",
+          "class": "zone s-off",
+          "id": "",
+          "dataAttrs": [
+            "slug"
+          ]
+        },
+        {
+          "tag": "DIV",
+          "text": "Aïn Zaghouan Nord🔌 58 · 💡 39 · il y a 26s⛔ Coupé\n      \n      ›\n    \n    \n      \n        🔌 Pas de",
+          "class": "zone s-off",
+          "id": "",
+          "dataAttrs": [
+            "slug"
+          ]
+        },
+        {
+          "tag": "DIV",
+          "text": "Alain Savary🔌 16 · 💡 21 · il y a 2 min✅ Ça marche\n      \n      ›\n    \n    \n      \n        🔌 Pas d",
+          "class": "zone s-on",
+          "id": "",
+          "dataAttrs": [
+            "slug"
+          ]
+        }
+      ]
+    }
+  ],
+  "hasLeaflet": false,
+  "hasMap": false,
+  "svgCount": 0,
+  "popupCount": 0,
+  "popupSamples": []
+}

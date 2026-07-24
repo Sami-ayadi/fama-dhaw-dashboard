@@ -1,29 +1,43 @@
 """
 Famma Dhaw Monitor - Backend
-Scrape famma-dhaw.com et sert les données au dashboard.
-Refresh à la demande (pas de scheduler) — compatible Render free tier.
+Interroge directement l'API Supabase publique utilisée par famma-dhaw.com.
+Aucun scraping HTML nécessaire — rapide et fiable.
 """
 
 from flask import Flask, jsonify, render_template, request, Response
 import requests
-from bs4 import BeautifulSoup
 import json
 import sqlite3
 import os
-import re
+import numpy as np
+from sklearn.ensemble import RandomForestClassifier
 import threading
 import logging
-from datetime import datetime, timedelta
+import time as time_module
+from datetime import datetime, timedelta, timezone
 
 # ─── Config ───────────────────────────────────────────────
 app = Flask(__name__)
 DATA_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data')
 DB_PATH = os.path.join(DATA_DIR, 'famma_dhaw.db')
 SCRAPE_INTERVAL_MIN = 5
-SOURCE_URL = 'https://famma-dhaw.com'
-PRIORITY_ZONES = [
-    'route menzel chaker', 'sfax ville',
-    'kairouan nord', 'gabès médina', 'gabes medina'
+
+# Tunisie = UTC+1 (pas de DST)
+TZ_TUNIS = timezone(timedelta(hours=1))
+
+def now_tn():
+    """Heure actuelle en Tunisie (datetime naïf pour compat SQLite)."""
+    return datetime.now(TZ_TUNIS).replace(tzinfo=None)
+
+# ─── API Supabase (publique, lecture seule) ───────────────
+SUPABASE_URL = 'https://njfulpklvqezflxiozhn.supabase.co'
+SUPABASE_API_KEY = 'sb_publishable_C_7rg0jf6-e925Tji5n-qA_mLYruFUp'
+ZONES_ENDPOINT = f'{SUPABASE_URL}/rest/v1/zone_board_weighted?select=*'
+STATS_ENDPOINT = f'{SUPABASE_URL}/rest/v1/platform_stats?select=total_reports'
+
+PRIORITY_KEYWORDS = [
+    'menzel chaker', 'sfax ville', 'kairouan',
+    'gabès', 'gabes'
 ]
 
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -35,7 +49,7 @@ scrape_lock = threading.Lock()
 latest_data = {
     'zones': [], 'stats': {}, 'timestamp': None,
     'success': False, 'error': None,
-    'scrape_log': []  # pour debug
+    'scrape_log': [], 'last_attempt': None
 }
 
 # ─── Base de données ─────────────────────────────────────
@@ -65,98 +79,97 @@ def save_snapshot(ts, zones):
     ok = sum(1 for z in zones if z['status'] == 'ok')
     reps = sum(z['reports'] for z in zones)
     conn = sqlite3.connect(DB_PATH)
-    conn.execute('INSERT INTO snapshots (timestamp,total_zones,cut_zones,ok_zones,total_reports,data_json) VALUES (?,?,?,?,?,?)',
-                 (ts, len(zones), cut, ok, reps, json.dumps(zones, ensure_ascii=False)))
+    conn.execute(
+        'INSERT INTO snapshots (timestamp,total_zones,cut_zones,ok_zones,total_reports,data_json) VALUES (?,?,?,?,?,?)',
+        (ts, len(zones), cut, ok, reps, json.dumps(zones, ensure_ascii=False))
+    )
     conn.commit()
     conn.close()
 
 def save_zone_history(ts, zones):
     conn = sqlite3.connect(DB_PATH)
     for z in zones:
-        conn.execute('INSERT INTO zone_history (timestamp,zone_name,governorate,status,reports) VALUES (?,?,?,?,?)',
-                     (ts, z['name'], z['governorate'], z['status'], z['reports']))
+        conn.execute(
+            'INSERT INTO zone_history (timestamp,zone_name,governorate,status,reports) VALUES (?,?,?,?,?)',
+            (ts, z['name'], z['governorate'], z['status'], z['reports'])
+        )
     conn.commit()
     conn.close()
 
 def clean_old_data():
-    cutoff = (datetime.now() - timedelta(days=30)).isoformat()
+    cutoff = (now_tn() - timedelta(days=30)).isoformat()
     conn = sqlite3.connect(DB_PATH)
     conn.execute('DELETE FROM snapshots WHERE timestamp < ?', (cutoff,))
     conn.execute('DELETE FROM zone_history WHERE timestamp < ?', (cutoff,))
     conn.commit()
     conn.close()
 
-# ─── Scraper multi-stratégie ─────────────────────────────
+# ─── Scraper (appel direct API Supabase) ──────────────────
 def scrape_famma_dhaw():
-    """
-    Stratégies de scraping, par ordre de priorité :
-    1. Découverte automatique d'API dans le HTML
-    2. Endpoints API courants
-    3. Parsing HTML du DOM
-    """
+    """Interroge l'API Supabase — même source que famma-dhaw.com."""
     global latest_data
     log = []
+
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'fr-FR,fr;q=0.9,en-US;q=0.8',
+        'Authorization': f'Bearer {SUPABASE_API_KEY}',
+        'Apikey': SUPABASE_API_KEY,
+        'Accept': '*/*',
+        'Accept-Profile': 'public',
     }
 
     try:
-        # ── Étape 1 : Fetch page principale ──
-        log.append(f"FETCH {SOURCE_URL}")
-        resp = requests.get(SOURCE_URL, headers=headers, timeout=20, verify=False)
+        # ── 1. Récupérer les zones ──
+        log.append(f"GET {ZONES_ENDPOINT}")
+        resp = requests.get(ZONES_ENDPOINT, headers=headers, timeout=15)
         log.append(f"Status: {resp.status_code}, Size: {len(resp.text)} chars")
         resp.raise_for_status()
-        html = resp.text
 
-        zones = None
+        raw_zones = resp.json()
+        log.append(f"Received {len(raw_zones)} zones from Supabase")
 
-        # ── Étape 2 : Chercher données JSON inline (Next.js, React, etc.) ──
-        log.append("Phase 1: Recherche JSON inline...")
-        zones = extract_inline_json(html, log)
+        if not raw_zones or not isinstance(raw_zones, list):
+            raise Exception(f"Réponse invalide: type={type(raw_zones)}, len={len(raw_zones) if isinstance(raw_zones, list) else 'N/A'}")
 
-        # ── Étape 3 : Découvrir et appeler les APIs ──
-        if not zones:
-            log.append("Phase 2: Découverte d'API endpoints...")
-            api_urls = discover_api_urls(html, log)
-            zones = try_api_endpoints(api_urls, headers, log)
+        # ── 2. Normaliser ──
+        processed = []
+        for z in raw_zones:
+            if not isinstance(z, dict):
+                continue
 
-        # ── Étape 4 : Essayer endpoints courants ──
-        if not zones:
-            log.append("Phase 3: Endpoints API courants...")
-            common = [
-                f'{SOURCE_URL}/api/zones',
-                f'{SOURCE_URL}/api/outages',
-                f'{SOURCE_URL}/api/data',
-                f'{SOURCE_URL}/api/v1/zones',
-                f'{SOURCE_URL}/api/v1/outages',
-                'https://api.famma-dhaw.com/zones',
-                'https://api.famma-dhaw.com/outages',
-            ]
-            zones = try_api_endpoints(common, headers, log)
+            name = (z.get('name') or '').strip()
+            if not name:
+                continue
 
-        # ── Étape 5 : Parsing HTML du DOM ──
-        if not zones:
-            log.append("Phase 4: Parsing HTML DOM...")
-            zones = parse_html_dom(html, log)
+            gov = (z.get('gov') or '').strip()
+            off_count = int(z.get('off_count') or 0)
+            on_count = int(z.get('on_count') or 0)
 
-        # ── Résultat ──
-        if not zones or len(zones) == 0:
-            log.append("ÉCHEC: Aucune zone trouvée avec aucune stratégie")
-            latest_data['success'] = False
-            latest_data['error'] = 'Aucune zone trouvée sur le site source'
-            latest_data['scrape_log'] = log
-            return False
+            # Statut : coupé si plus de signalements "off" que "on"
+            status = 'cut' if off_count > on_count else 'ok'
+            reports = off_count + on_count
 
-        # Normaliser
-        processed = normalize_zones(zones)
-        log.append(f"SUCCÈS: {len(processed)} zones extraites")
+            processed.append({
+                'name': name,
+                'slug': z.get('slug', ''),
+                'governorate': gov,
+                'status': status,
+                'reports': reports,
+                'off_count': off_count,
+                'on_count': on_count,
+                'last_report': z.get('last_report'),
+                'is_priority': any(kw in name.lower() for kw in PRIORITY_KEYWORDS)
+            })
 
-        now = datetime.now().isoformat()
+        if not processed:
+            raise Exception("Aucune zone extraite de la réponse API")
+
+        # ── 3. Calculer les stats ──
         cut_count = sum(1 for z in processed if z['status'] == 'cut')
         ok_count = sum(1 for z in processed if z['status'] == 'ok')
         total_reports = sum(z['reports'] for z in processed)
+
+        now = now_tn().isoformat()
 
         latest_data = {
             'zones': processed,
@@ -170,288 +183,71 @@ def scrape_famma_dhaw():
             'timestamp': now,
             'success': True,
             'error': None,
-            'scrape_log': log
+            'scrape_log': log,
+            'last_attempt': now
         }
 
+        # ── 4. Sauvegarder en DB ──
         save_snapshot(now, processed)
         save_zone_history(now, processed)
         clean_old_data()
+
+        logger.info(f"Scrape OK: {len(processed)} zones, {cut_count} coupées ({latest_data['stats']['cut_percentage']}%)")
         return True
 
     except Exception as e:
-        log.append(f"EXCEPTION: {type(e).__name__}: {e}")
+        log.append(f"ERROR: {type(e).__name__}: {e}")
         latest_data['success'] = False
         latest_data['error'] = str(e)
         latest_data['scrape_log'] = log
-        logger.error(f"Scrape failed: {e}")
+        latest_data['last_attempt'] = now_tn().isoformat()
+        logger.error(f"Scrape échoué: {e}")
         return False
-
-
-def extract_inline_json(html, log):
-    """Cherche des données JSON dans les balises script (Next.js __NEXT_DATA__, etc.)"""
-    soup = BeautifulSoup(html, 'html.parser')
-    for script in soup.find_all('script'):
-        text = script.string or ''
-        if not text:
-            continue
-
-        # Next.js
-        if '__NEXT_DATA__' in text:
-            log.append("  Trouvé __NEXT_DATA__")
-            try:
-                m = re.search(r'__NEXT_DATA__\s*=\s*({.*?})\s*;?\s*$', text, re.DOTALL)
-                if m:
-                    data = json.loads(m.group(1))
-                    zones = deep_find_zones(data)
-                    if zones:
-                        log.append(f"  {len(zones)} zones depuis __NEXT_DATA__")
-                        return zones
-            except Exception as e:
-                log.append(f"  Parse __NEXT_DATA__ échoué: {e}")
-
-        # window.__INITIAL_STATE__ ou window.__DATA__
-        for var in ['__INITIAL_STATE__', '__DATA__', '__APP_DATA__', 'initialData', 'window.zones']:
-            if var in text:
-                log.append(f"  Trouvé {var}")
-                try:
-                    m = re.search(r'(?:window\.)?' + re.escape(var) + r'\s*=\s*(\{.*?\}|\[.*?\])\s*;?', text, re.DOTALL)
-                    if m:
-                        data = json.loads(m.group(1))
-                        zones = deep_find_zones(data)
-                        if zones:
-                            log.append(f"  {len(zones)} zones depuis {var}")
-                            return zones
-                except Exception as e:
-                    log.append(f"  Parse {var} échoué: {e}")
-
-        # Pattern générique: zones = [...] ou zones: [...]
-        for pattern in [
-            r'(?:var|const|let)\s+zones?\s*=\s*(\[[\s\S]*?\])\s*;',
-            r'zones?\s*:\s*(\[[\s\S]*?\])\s*[,}]',
-            r'(?:var|const|let)\s+data\s*=\s*(\[[\s\S]*?\])\s*;',
-            r'data\s*:\s*(\[[\s\S]*?\])\s*[,}]',
-        ]:
-            matches = re.findall(pattern, text)
-            for match in matches:
-                try:
-                    data = json.loads(match)
-                    if isinstance(data, list) and len(data) > 0:
-                        if isinstance(data[0], dict):
-                            log.append(f"  {len(data)} zones depuis pattern générique")
-                            return data
-                except:
-                    continue
-    return None
-
-
-def deep_find_zones(obj, depth=0):
-    """Cherche récursivement une liste de dicts ressemblant à des zones"""
-    if depth > 8:
-        return None
-    if isinstance(obj, list) and len(obj) > 0 and isinstance(obj[0], dict):
-        # Vérifier si ça ressemble à des zones
-        sample = obj[0]
-        keys = set(sample.keys())
-        name_keys = {'name', 'zone', 'zone_name', 'title', 'label', 'nom', 'zoneName'}
-        status_keys = {'status', 'etat', 'state', 'is_cut', 'cut', 'outage', 'has_outage', 'hasOutage'}
-        if keys & name_keys:
-            return obj
-        if keys & status_keys and len(obj) > 5:
-            return obj
-    if isinstance(obj, dict):
-        # Priorité: clés courantes pour les zones
-        for key in ['zones', 'data', 'results', 'outages', 'regions', 'areas', 'items', 'features']:
-            if key in obj:
-                result = deep_find_zones(obj[key], depth + 1)
-                if result:
-                    return result
-        # Sinon essayer toutes les valeurs
-        for v in obj.values():
-            result = deep_find_zones(v, depth + 1)
-            if result:
-                return result
-    return None
-
-
-def discover_api_urls(html, log):
-    """Trouve des URLs d'API dans le code JavaScript"""
-    urls = set()
-    # Chercher des fetch() ou axios calls
-    patterns = [
-        r'fetch\s*\(\s*["\']([^"\']+)["\']',
-        r'axios\.\w+\s*\(\s*["\']([^"\']+)["\']',
-        r'["\'](?:/api/[^"\']+)["\']',
-        r'baseURL\s*:\s*["\']([^"\']+)["\']',
-        r'api[_-]?url\s*:\s*["\']([^"\']+)["\']',
-    ]
-    for p in patterns:
-        for m in re.findall(p, html):
-            if m.startswith('/'):
-                m = SOURCE_URL + m
-            if 'famma' in m.lower() or m.startswith(SOURCE_URL):
-                urls.add(m)
-    log.append(f"  {len(urls)} URLs découvertes: {list(urls)[:5]}")
-    return list(urls)
-
-
-def try_api_endpoints(urls, headers, log):
-    """Essaie chaque URL et retourne les zones si trouvées"""
-    for url in urls:
-        try:
-            log.append(f"  GET {url}")
-            r = requests.get(url, headers=headers, timeout=10, verify=False)
-            log.append(f"    → {r.status_code}")
-            if r.status_code != 200:
-                continue
-            data = r.json()
-            zones = None
-            if isinstance(data, list):
-                zones = data
-            elif isinstance(data, dict):
-                for key in ['zones', 'data', 'results', 'outages', 'items', 'features']:
-                    if key in data:
-                        val = data[key]
-                        if isinstance(val, list):
-                            zones = val
-                            break
-                        elif isinstance(val, dict):
-                            # Peut être groupé par gouvernorat
-                            all_zones = []
-                            for k, v in val.items():
-                                if isinstance(v, list):
-                                    for item in v:
-                                        if isinstance(item, dict):
-                                            item['_gov_from_key'] = k
-                                            all_zones.append(item)
-                            if all_zones:
-                                zones = all_zones
-                                break
-            if zones and len(zones) > 0:
-                log.append(f"    → {len(zones)} zones trouvées!")
-                return zones
-        except Exception as e:
-            log.append(f"    → Erreur: {e}")
-    return None
-
-
-def parse_html_dom(html, log):
-    """Parse le DOM HTML pour trouver des zones"""
-    soup = BeautifulSoup(html, 'html.parser')
-    zones = []
-
-    # Chercher des éléments avec des classes/attributs suggestifs
-    selectors = [
-        {'tag': 'div', 'class_re': r'zone|region|area|marker|pin|outage|coupure'},
-        {'tag': 'li', 'class_re': r'zone|region|area|outage'},
-        {'tag': 'span', 'class_re': r'zone|region|status|badge'},
-        {'tag': 'tr', 'class_re': r'zone|region|row'},
-    ]
-
-    seen = set()
-    for sel in selectors:
-        elements = soup.find_all(sel['tag'], class_=re.compile(sel['class_re'], re.I))
-        for el in elements:
-            name = el.get_text(strip=True)
-            name = re.sub(r'\s+', ' ', name).strip()
-            if not name or len(name) < 3 or name in seen:
-                continue
-            seen.add(name)
-
-            status = 'ok'
-            el_class = ' '.join(el.get('class', []))
-            el_html = str(el)
-            if re.search(r'cut|coup|outage|red|off|alert|danger', el_class + el_html, re.I):
-                status = 'cut'
-
-            # Chercher nombre de signalements
-            reports = 0
-            num_match = re.search(r'(\d+)\s*(?:signalement|vote|report|signal)', el_html, re.I)
-            if num_match:
-                reports = int(num_match.group(1))
-
-            zones.append({'name': name, 'status': status, 'reports': reports})
-            if len(zones) > 500:
-                break
-        if len(zones) > 10:
-            break
-
-    log.append(f"  {len(zones)} zones depuis le DOM")
-    return zones if zones else None
-
-
-def normalize_zones(raw_zones):
-    """Normalise les zones dans un format uniforme"""
-    processed = []
-    for z in raw_zones:
-        if not isinstance(z, dict):
-            continue
-
-        # Nom
-        gov_from_key = z.pop('_gov_from_key', '')
-        name = (z.get('name') or z.get('zone') or z.get('zone_name') or
-                z.get('title') or z.get('label') or z.get('nom') or
-                z.get('zoneName') or '').strip()
-        if not name:
-            continue
-
-        # Gouvernorat
-        gov = (z.get('governorate') or z.get('gov') or z.get('region') or
-               z.get('gouvernorat') or z.get('state') or gov_from_key or '').strip()
-
-        # Statut
-        status_raw = str(z.get('status') or z.get('etat') or z.get('state') or '').lower()
-        is_cut_val = z.get('is_cut') or z.get('cut') or z.get('outage') or z.get('has_outage') or z.get('hasOutage')
-
-        if status_raw in ('cut', 'coupé', 'coupe', 'outage', 'off', '1', 'true', 'coupée'):
-            status = 'cut'
-        elif status_raw in ('ok', 'normal', 'on', '0', 'false', 'active'):
-            status = 'ok'
-        elif is_cut_val in (True, 'true', '1', 1):
-            status = 'cut'
-        elif is_cut_val in (False, 'false', '0', 0):
-            status = 'ok'
-        else:
-            # Heuristique: chercher des mots-clés
-            if any(kw in status_raw for kw in ['coup', 'cut', 'off', 'panne']):
-                status = 'cut'
-            else:
-                status = 'ok'
-
-        # Signalements
-        reports = z.get('reports') or z.get('votes') or z.get('count') or z.get('signalements') or z.get('nbSignalement') or 0
-        try:
-            reports = int(reports)
-        except (ValueError, TypeError):
-            reports = 0
-
-        processed.append({
-            'name': name,
-            'governorate': gov,
-            'status': status,
-            'reports': max(0, reports),
-            'is_priority': any(pz in name.lower() for pz in PRIORITY_ZONES)
-        })
-
-    return processed
-
 
 # ─── Refresh à la demande ────────────────────────────────
 def ensure_fresh():
-    """Vérifie si les données sont périmées et scrape si nécessaire"""
+    """Scrape si les données ont plus de 5 minutes."""
     with scrape_lock:
+        now = now_tn()
+
+        # Données encore fraîches ?
         if latest_data.get('timestamp'):
             try:
                 last = datetime.fromisoformat(latest_data['timestamp'])
-                age = (datetime.now() - last).total_seconds()
-                if age > SCRAPE_INTERVAL_MIN * 60:
-                    logger.info(f"Data stale ({age:.0f}s old), refreshing...")
-                    scrape_famma_dhaw()
+                age = (now - last).total_seconds()
+                if age < SCRAPE_INTERVAL_MIN * 60:
+                    return
             except:
-                scrape_famma_dhaw()
-        else:
-            logger.info("No data yet, scraping...")
-            scrape_famma_dhaw()
+                pass
 
+        # Ne pas réessayer trop vite après un échec
+        if latest_data.get('last_attempt'):
+            try:
+                attempt = datetime.fromisoformat(latest_data['last_attempt'])
+                if (now - attempt).total_seconds() < 60:
+                    return
+            except:
+                pass
+
+        scrape_famma_dhaw()
+
+# ─── Scheduler en arrière-plan ────────────────────────────
+def start_background_scheduler():
+    """Démarre un thread qui scrape toutes les 5 minutes."""
+    def run():
+        # Attendre 10s au démarrage pour laisser l'app se lancer
+        time_module.sleep(10)
+        while True:
+            try:
+                with scrape_lock:
+                    scrape_famma_dhaw()
+            except Exception as e:
+                logger.error(f"Scheduler error: {e}")
+            time_module.sleep(SCRAPE_INTERVAL_MIN * 60)
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+    logger.info(f"Background scheduler démarré (toutes les {SCRAPE_INTERVAL_MIN} min)")
 
 # ─── Routes API ───────────────────────────────────────────
 @app.route('/')
@@ -465,7 +261,7 @@ def api_zones():
         'zones': latest_data.get('zones', []),
         'timestamp': latest_data.get('timestamp'),
         'success': latest_data.get('success', False),
-        'error': latest_data.get('scrape_error')
+        'error': latest_data.get('error')
     })
 
 @app.route('/api/stats')
@@ -490,16 +286,23 @@ def api_stats():
 
     govs = {k: v for k, v in gov_stats.items() if v['total'] > 0}
     if govs:
-        most = max(govs.items(), key=lambda x: x[1]['cut'])
-        least = min(govs.items(), key=lambda x: x[1]['cut'])
+        most = max(govs.items(), key=lambda x: x[1]['cut'] / x[1]['total'] if x[1]['total'] > 0 else 0)
+        least = min(govs.items(), key=lambda x: x[1]['cut'] / x[1]['total'] if x[1]['total'] > 0 else 0)
         stats['most_cut_gov'] = {'name': most[0], **most[1]}
         stats['least_cut_gov'] = {'name': least[0], **least[1]}
 
     # Route Menzel Chaker
     mc = [z for z in zones if 'menzel chaker' in z['name'].lower()]
     if mc:
-        stats['menzel_chaker'] = {'name': mc[0]['name'], 'status': mc[0]['status'],
-                                   'reports': mc[0]['reports'], 'is_cut': mc[0]['status'] == 'cut'}
+        stats['menzel_chaker'] = {
+            'name': mc[0]['name'],
+            'status': mc[0]['status'],
+            'reports': mc[0]['reports'],
+            'off_count': mc[0].get('off_count', 0),
+            'on_count': mc[0].get('on_count', 0),
+            'is_cut': mc[0]['status'] == 'cut'
+        }
+
     stats['governorates'] = gov_stats
     return jsonify(stats)
 
@@ -507,41 +310,53 @@ def api_stats():
 def api_history():
     ensure_fresh()
     hours = request.args.get('hours', 24, type=int)
-    cutoff = (datetime.now() - timedelta(hours=hours)).isoformat()
+    cutoff = (now_tn() - timedelta(hours=hours)).isoformat()
     conn = sqlite3.connect(DB_PATH)
     rows = conn.execute(
         'SELECT timestamp, total_zones, cut_zones, ok_zones, total_reports FROM snapshots WHERE timestamp >= ? ORDER BY timestamp',
         (cutoff,)).fetchall()
     conn.close()
-    return jsonify({'history': [{'timestamp': r[0], 'total': r[1], 'cut': r[2], 'ok': r[3], 'reports': r[4]} for r in rows]})
+    return jsonify({'history': [
+        {'timestamp': r[0], 'total': r[1], 'cut': r[2], 'ok': r[3], 'reports': r[4]}
+        for r in rows
+    ]})
 
 @app.route('/api/top-regions')
 def api_top_regions():
     ensure_fresh()
     hours = request.args.get('hours', 24, type=int)
-    cutoff = (datetime.now() - timedelta(hours=hours)).isoformat()
+    cutoff = (now_tn() - timedelta(hours=hours)).isoformat()
     conn = sqlite3.connect(DB_PATH)
     rows = conn.execute('''
-        SELECT zone_name, COUNT(*) as total, SUM(CASE WHEN status='cut' THEN 1 ELSE 0 END) as cuts
-        FROM zone_history WHERE timestamp >= ? GROUP BY zone_name HAVING total > 1 ORDER BY cuts DESC
+        SELECT zone_name, COUNT(*) as total,
+               SUM(CASE WHEN status='cut' THEN 1 ELSE 0 END) as cuts
+        FROM zone_history WHERE timestamp >= ?
+        GROUP BY zone_name HAVING total > 1 ORDER BY cuts DESC
     ''', (cutoff,)).fetchall()
     conn.close()
 
-    regions = [{'name': r[0], 'cut_hours': round(r[2] * SCRAPE_INTERVAL_MIN / 60, 1),
-                'cut_checks': r[2], 'total': r[1],
-                'pct': round(r[2] / r[1] * 100, 1) if r[1] > 0 else 0} for r in rows]
-    return jsonify({'most': regions[:10], 'least': sorted(regions, key=lambda x: x['cut_hours'])[:10]})
+    regions = [{
+        'name': r[0],
+        'cut_hours': round(r[2] * SCRAPE_INTERVAL_MIN / 60, 1),
+        'cut_checks': r[2], 'total': r[1],
+        'pct': round(r[2] / r[1] * 100, 1) if r[1] > 0 else 0
+    } for r in rows]
+    return jsonify({
+        'most': regions[:10],
+        'least': sorted(regions, key=lambda x: x['cut_hours'])[:10]
+    })
 
 @app.route('/api/heatmap')
 def api_heatmap():
     ensure_fresh()
     hours = request.args.get('hours', 24, type=int)
-    cutoff = (datetime.now() - timedelta(hours=hours)).isoformat()
+    cutoff = (now_tn() - timedelta(hours=hours)).isoformat()
     conn = sqlite3.connect(DB_PATH)
     rows = conn.execute('''
         SELECT COALESCE(governorate,'Non spécifié') as gov,
                CAST(strftime('%H',timestamp) AS INTEGER) as hr,
-               COUNT(*) as t, SUM(CASE WHEN status='cut' THEN 1 ELSE 0 END) as c
+               COUNT(*) as t,
+               SUM(CASE WHEN status='cut' THEN 1 ELSE 0 END) as c
         FROM zone_history WHERE timestamp >= ? GROUP BY gov, hr
     ''', (cutoff,)).fetchall()
     conn.close()
@@ -555,72 +370,198 @@ def api_heatmap():
 def api_hourly():
     ensure_fresh()
     hours = request.args.get('hours', 24, type=int)
-    cutoff = (datetime.now() - timedelta(hours=hours)).isoformat()
+    cutoff = (now_tn() - timedelta(hours=hours)).isoformat()
     conn = sqlite3.connect(DB_PATH)
     rows = conn.execute('''
         SELECT CAST(strftime('%H',timestamp) AS INTEGER) as hr,
-               COUNT(*) as t, SUM(CASE WHEN status='cut' THEN 1 ELSE 0 END) as c
+               COUNT(*) as t,
+               SUM(CASE WHEN status='cut' THEN 1 ELSE 0 END) as c
         FROM zone_history WHERE timestamp >= ? GROUP BY hr ORDER BY hr
     ''', (cutoff,)).fetchall()
     conn.close()
-    return jsonify({'pattern': [{'hour': r[0], 'total': r[1], 'cut': r[2],
-                                 'pct': round(r[2]/r[1]*100, 1) if r[1] > 0 else 0,
-                                 'period': 'pointe' if 14 <= r[0] <= 22 else 'creuse'} for r in rows]})
+    return jsonify({'pattern': [{
+        'hour': r[0], 'total': r[1], 'cut': r[2],
+        'pct': round(r[2]/r[1]*100, 1) if r[1] > 0 else 0,
+        'period': 'pointe' if 14 <= r[0] <= 22 else 'creuse'
+    } for r in rows]})
+
+
 
 @app.route('/api/forecast')
 def api_forecast():
+    """
+    Modèle de Machine Learning (Random Forest) entraîné pour chaque zone.
+    Apprend de l'historique pour prédire la probabilité de coupure.
+    """
     ensure_fresh()
-    zone = request.args.get('zone', 'Menzel Chaker')
-    cutoff = (datetime.now() - timedelta(hours=24)).isoformat()
+    
+    zone_query = request.args.get('zone', 'Menzel Chaker')
+    # On prend 7 jours d'historique pour entraîner le modèle
+    cutoff = (now_tn() - timedelta(days=7)).isoformat()
+    
     conn = sqlite3.connect(DB_PATH)
     rows = conn.execute('''
-        SELECT timestamp, status FROM zone_history
-        WHERE zone_name LIKE ? AND timestamp >= ? ORDER BY timestamp
-    ''', (f'%{zone}%', cutoff)).fetchall()
+        SELECT timestamp, status, reports FROM zone_history
+        WHERE zone_name LIKE ? AND timestamp >= ? ORDER BY timestamp ASC
+    ''', (f'%{zone_query}%', cutoff)).fetchall()
     conn.close()
 
-    if not rows:
-        return jsonify({'zone': zone, 'error': 'Pas de données historiques', 'observed': [], 'forecast': []})
+    # ── 1. Préparation des données (Feature Engineering) ──
+    if not rows or len(rows) < 24:
+        # Pas assez de données pour entraîner un ML, on utilise un fallback heuristique
+        now = now_tn()
+        forecast = []
+        for h in range(1, 7):
+            fhr = (now.hour + h) % 24
+            prob = 0.65 if 14 <= fhr <= 22 else (0.35 if 6 <= fhr < 14 else 0.15)
+            if any(kw in zone_query.lower() for kw in PRIORITY_KEYWORDS):
+                prob = min(0.95, prob * 1.4)
+            ft = (now + timedelta(hours=h)).strftime('%Y-%m-%d %H:00')
+            forecast.append({'time': ft, 'probability': round(prob * 100, 1), 'predicted_status': 'COUPE' if prob > 0.5 else 'OK', 'type': 'forecast'})
+            
+        return jsonify({
+            'zone': zone_query, 'observed': [], 'forecast': forecast,
+            'cut_hours_24h': 0, 'confidence': 'low', 'margin': '±22%',
+            'model_info': 'Données insuffisantes pour ML (fallback utilisé)'
+        })
 
-    # Agréger par heure
-    hourly = {}
-    for ts, st in rows:
-        key = datetime.fromisoformat(ts).strftime('%Y-%m-%d %H:00')
-        hourly.setdefault(key, []).append(1 if st == 'cut' else 0)
+    # Agréger les données par heure pour avoir un signal clair
+    hourly_data = {}
+    for ts, st, reps in rows:
+        try:
+            dt = datetime.fromisoformat(ts)
+            key = dt.strftime('%Y-%m-%d %H:00')
+            if key not in hourly_data:
+                hourly_data[key] = {'cut_votes': 0, 'ok_votes': 0, 'reports': 0, 'dt': dt}
+            if st == 'cut':
+                hourly_data[key]['cut_votes'] += 1
+            else:
+                hourly_data[key]['ok_votes'] += 1
+            hourly_data[key]['reports'] += reps
+        except:
+            continue
 
-    avg_hourly = {k: sum(v)/len(v) for k, v in hourly.items()}
-    sorted_h = sorted(avg_hourly.items())
+    sorted_hours = sorted(hourly_data.items())
+    
+    # Création des features (X) et de la cible (y)
+    X = []
+    y = []
+    
+    for i in range(1, len(sorted_hours)):
+        curr_key, curr_data = sorted_hours[i]
+        prev_key, prev_data = sorted_hours[i-1]
+        
+        dt = curr_data['dt']
+        
+        # La cible : la zone était-elle coupée à cette heure ? (majorité de votes)
+        target = 1 if curr_data['cut_votes'] > curr_data['ok_votes'] else 0
+        
+        # Les features :
+        # 1. Heure (0-23)
+        # 2. Jour de la semaine (0-6)
+        # 3. Est-ce l'heure de pointe ? (14h-22h)
+        # 4. Statut précédent (1 si coupé, 0 sinon)
+        # 5. Nombre de signalements précédents
+        features = [
+            dt.hour,
+            dt.weekday(),
+            1 if 14 <= dt.hour <= 22 else 0,
+            1 if prev_data['cut_votes'] > prev_data['ok_votes'] else 0,
+            prev_data['reports']
+        ]
+        
+        X.append(features)
+        y.append(target)
 
-    # EWMA α=0.3
-    alpha = 0.3
-    ewma = sorted_h[0][1]
-    observed = []
-    for i, (ts, val) in enumerate(sorted_h):
-        ewma = alpha * val + (1 - alpha) * ewma
-        observed.append({'time': ts, 'value': round(val, 3), 'ewma': round(ewma, 3), 'type': 'observed'})
+    X = np.array(X)
+    y = np.array(y)
 
-    # Prédiction 6h
-    now = datetime.now()
+    # ── 2. Entraînement du modèle ML ──
+    # Random Forest est parfait pour ça : il capture les non-linéarités et les règles temporelles
+    model = RandomForestClassifier(n_estimators=100, max_depth=5, random_state=42, class_weight='balanced')
+    
+    # Si le modèle n'a vu qu'une seule classe (toujours OK ou toujours coupé), on ne peut pas apprendre
+    if len(np.unique(y)) < 2:
+        # Fallback si une seule classe existe
+        unique_class = int(y[0])
+        prob_func = lambda h: 0.95 if unique_class == 1 else 0.05
+    else:
+        model.fit(X, y)
+        prob_func = lambda features: model.predict_proba([features])[0][1] # Probabilité d'être coupé (classe 1)
+
+    # ── 3. Prédiction pour les 6 prochaines heures ──
+    now = now_tn()
     forecast = []
-    last_ewma = ewma
+    observed = []
+    
+    # Récupérer le dernier statut connu pour la prédiction
+    last_data = sorted_hours[-1][1]
+    last_status = 1 if last_data['cut_votes'] > last_data['ok_votes'] else 0
+    last_reports = last_data['reports']
+
+    # Données observées pour le graphique
+    for key, data in sorted_hours:
+        if (now - data['dt']).total_seconds() <= 24 * 3600:
+            observed.append({
+                'time': key, 
+                'value': 1 if data['cut_votes'] > data['ok_votes'] else 0, 
+                'type': 'observed'
+            })
+
+    # Génération prédictive
+    current_status = last_status
+    current_reports = last_reports
+    
     for h in range(1, 7):
-        fhr = (now.hour + h) % 24
-        factor = 1.35 if 14 <= fhr <= 22 else 0.78
-        pred = min(1.0, max(0.0, last_ewma * factor))
-        ft = (now + timedelta(hours=h)).strftime('%Y-%m-%d %H:00')
-        forecast.append({'time': ft, 'value': round(pred, 3), 'type': 'forecast'})
-        last_ewma = alpha * pred + (1 - alpha) * last_ewma
+        f_dt = now + timedelta(hours=h)
+        
+        features = [
+            f_dt.hour,
+            f_dt.weekday(),
+            1 if 14 <= f_dt.hour <= 22 else 0,
+            current_status,
+            current_reports
+        ]
+        
+        # Prédiction ML
+        prob = float(prob_func(features))
+        prob = max(0.02, min(0.98, prob)) # Bornage
+        
+        # Mise à jour pour le step suivant (le modèle prédit l'état futur, qui devient l'état précédent du step d'après)
+        current_status = 1 if prob > 0.5 else 0
+        # On estime l'évolution des signalements
+        current_reports = int(current_reports * (1.2 if current_status == 1 else 0.8))
+        
+        ft = f_dt.strftime('%Y-%m-%d %H:00')
+        forecast.append({
+            'time': ft, 
+            'value': round(prob, 3),
+            'probability': round(prob * 100, 1),
+            'predicted_status': 'COUPE' if prob > 0.5 else 'OK',
+            'type': 'forecast'
+        })
 
-    cut_entries = [r for r in rows if r[1] == 'cut']
-    cut_hours = round(len(cut_entries) * SCRAPE_INTERVAL_MIN / 60, 1)
-
+    # ── 4. Statistiques finales ──
+    cut_hours_24h = round(sum(1 for o in observed if o['value'] == 1), 1)
     next_cut = next((f['time'] for f in forecast if f['value'] > 0.5), None)
-    conf = 'high' if len(sorted_h) >= 48 else ('medium' if len(sorted_h) >= 12 else 'low')
+    
+    if len(sorted_hours) >= 100:
+        conf, margin = 'high', '±15%'
+    elif len(sorted_hours) >= 48:
+        conf, margin = 'medium', '±18%'
+    else:
+        conf, margin = 'low', '±22%'
 
-    return jsonify({'zone': zone, 'observed': observed, 'forecast': forecast,
-                    'cut_hours_24h': cut_hours, 'next_cut': next_cut,
-                    'confidence': conf, 'margin': '±15%' if conf != 'low' else '±22%'})
-
+    return jsonify({
+        'zone': zone_query, 
+        'observed': observed, 
+        'forecast': forecast,
+        'cut_hours_24h': cut_hours_24h, 
+        'next_cut': next_cut,
+        'confidence': conf, 
+        'margin': margin,
+        'model_info': f'Random Forest (100 arbres) - Entraîné sur {len(X)} points historiques'
+    })
 @app.route('/api/alerts')
 def api_alerts():
     ensure_fresh()
@@ -628,52 +569,96 @@ def api_alerts():
     stats = latest_data.get('stats', {})
     alerts = []
     pct = stats.get('cut_percentage', 0)
+    ts = latest_data.get('timestamp')
 
     if pct >= 60:
-        alerts.append({'type': 'critical', 'msg': f'ALERTE CRITIQUE : {pct}% des zones sont coupées !', 'ts': latest_data.get('timestamp')})
+        alerts.append({
+            'type': 'critical',
+            'msg': f'🚨 ALERTE CRITIQUE : {pct}% des zones sont coupées !',
+            'ts': ts
+        })
     elif pct >= 40:
-        alerts.append({'type': 'warning', 'msg': f'Attention : {pct}% des zones sont coupées', 'ts': latest_data.get('timestamp')})
+        alerts.append({
+            'type': 'warning',
+            'msg': f'⚠️ Attention : {pct}% des zones sont coupées',
+            'ts': ts
+        })
 
     for z in zones:
-        if z['is_priority'] and z['status'] == 'cut':
-            alerts.append({'type': 'priority', 'msg': f'⚡ {z["name"]} est COUPÉE ({z["reports"]} signalements)', 'ts': latest_data.get('timestamp')})
+        if z.get('is_priority') and z['status'] == 'cut':
+            alerts.append({
+                'type': 'priority',
+                'msg': f'⚡ {z["name"]} est COUPÉE ({z["reports"]} signalements)',
+                'ts': ts
+            })
 
     return jsonify({'alerts': alerts})
 
 @app.route('/api/report')
 def api_report():
     ensure_fresh()
-    cutoff = (datetime.now() - timedelta(hours=24)).isoformat()
+    cutoff = (now_tn() - timedelta(hours=24)).isoformat()
     conn = sqlite3.connect(DB_PATH)
-    row = conn.execute('SELECT AVG(cut_zones), MAX(cut_zones), MIN(cut_zones), COUNT(*) FROM snapshots WHERE timestamp >= ?', (cutoff,)).fetchone()
-    worst = conn.execute('SELECT governorate, SUM(CASE WHEN status=\'cut\' THEN 1 ELSE 0 END), COUNT(*) FROM zone_history WHERE timestamp >= ? AND governorate IS NOT NULL AND governorate != \'\' GROUP BY governorate ORDER BY 2 DESC LIMIT 1', (cutoff,)).fetchone()
-    best = conn.execute('SELECT governorate, SUM(CASE WHEN status=\'cut\' THEN 1 ELSE 0 END), COUNT(*) FROM zone_history WHERE timestamp >= ? AND governorate IS NOT NULL AND governorate != \'\' GROUP BY governorate ORDER BY 2 ASC LIMIT 1', (cutoff,)).fetchone()
+    row = conn.execute(
+        'SELECT AVG(cut_zones), MAX(cut_zones), MIN(cut_zones), COUNT(*) FROM snapshots WHERE timestamp >= ?',
+        (cutoff,)
+    ).fetchone()
+    worst = conn.execute('''
+        SELECT governorate,
+               SUM(CASE WHEN status='cut' THEN 1 ELSE 0 END),
+               COUNT(*)
+        FROM zone_history WHERE timestamp >= ?
+        AND governorate IS NOT NULL AND governorate != ''
+        GROUP BY governorate ORDER BY 2 DESC LIMIT 1
+    ''', (cutoff,)).fetchone()
+    best = conn.execute('''
+        SELECT governorate,
+               SUM(CASE WHEN status='cut' THEN 1 ELSE 0 END),
+               COUNT(*)
+        FROM zone_history WHERE timestamp >= ?
+        AND governorate IS NOT NULL AND governorate != ''
+        GROUP BY governorate ORDER BY 2 ASC LIMIT 1
+    ''', (cutoff,)).fetchone()
     conn.close()
 
     avg = round(row[0], 1) if row[0] else 0
     if avg >= 60:
-        sev, col, rec = 'critique', '#e8392b', 'Situation critique. Évitez les déplacements. Préparez des solutions de secours.'
+        sev, col, rec = 'critique', '#e8392b', 'Situation critique. Évitez les déplacements non essentiels.'
     elif avg >= 35:
         sev, col, rec = 'modérée', '#f5c518', 'Coupures fréquentes. Planifiez en dehors des heures de pointe (14h-22h).'
     else:
         sev, col, rec = 'faible', '#1db954', 'Situation normale. Quelques coupures localisées possibles.'
 
     return jsonify({
-        'generated': datetime.now().isoformat(), 'severity': sev, 'color': col,
-        'avg_cut': avg, 'max_cut': row[1] or 0, 'min_cut': row[2] or 0, 'snapshots': row[3] or 0,
+        'generated': now_tn().isoformat(),
+        'severity': sev, 'color': col,
+        'avg_cut': avg, 'max_cut': row[1] or 0, 'min_cut': row[2] or 0,
+        'snapshots': row[3] or 0,
         'worst': {'name': worst[0], 'cuts': worst[1], 'total': worst[2]} if worst else None,
         'best': {'name': best[0], 'cuts': best[1], 'total': best[2]} if best else None,
         'recommendation': rec,
         'mc_advice': 'Évitez la Route Menzel Chaker entre 14h et 22h.' if sev in ('critique', 'modérée') else 'Passage possible sans risque majeur.'
     })
-
+@app.route('/api/zones/list')
+def api_zones_list():
+    """Retourne la liste de toutes les zones disponibles pour la prédiction"""
+    ensure_fresh()
+    zones = latest_data.get('zones', [])
+    return jsonify({
+        'zones': sorted([z['name'] for z in zones]),
+        'count': len(zones)
+    })
 @app.route('/api/export')
 def api_export():
     ensure_fresh()
     zones = latest_data.get('zones', [])
-    lines = ['Zone,Gouvernorat,Statut,Signalements,Prioritaire']
+    lines = ['Zone,Gouvernorat,Statut,Signalements_Coupure,Signalements_OK,Total,Prioritaire']
     for z in zones:
-        lines.append(f'"{z["name"]}","{z["governorate"]}","{z["status"]}",{z["reports"]},{"Oui" if z["is_priority"] else "Non"}')
+        lines.append(
+            f'"{z["name"]}","{z["governorate"]}","{z["status"]}",'
+            f'{z.get("off_count",0)},{z.get("on_count",0)},{z["reports"]},'
+            f'{"Oui" if z.get("is_priority") else "Non"}'
+        )
     return Response('\n'.join(lines), mimetype='text/csv',
                     headers={'Content-Disposition': 'attachment; filename=famma-dhaw-export.csv'})
 
@@ -681,12 +666,15 @@ def api_export():
 def api_refresh():
     with scrape_lock:
         success = scrape_famma_dhaw()
-    return jsonify({'success': success, 'timestamp': latest_data.get('timestamp'),
-                    'zones': len(latest_data.get('zones', [])), 'error': latest_data.get('error')})
+    return jsonify({
+        'success': success,
+        'timestamp': latest_data.get('timestamp'),
+        'zones': len(latest_data.get('zones', [])),
+        'error': latest_data.get('error')
+    })
 
 @app.route('/api/debug')
 def api_debug():
-    """Endpoint de debug — montre le détail du dernier scrape"""
     return jsonify({
         'timestamp': latest_data.get('timestamp'),
         'success': latest_data.get('success'),
@@ -694,15 +682,19 @@ def api_debug():
         'zones_count': len(latest_data.get('zones', [])),
         'stats': latest_data.get('stats'),
         'scrape_log': latest_data.get('scrape_log', []),
-        'sample_zones': latest_data.get('zones', [])[:5]
+        'sample_zones': latest_data.get('zones', [])[:3]
     })
 
+# ─── Démarrage ────────────────────────────────────────────
+# Initialiser même si importé par gunicorn
+init_db()
 
-# ─── Startup ──────────────────────────────────────────────
+# Premier scrape au démarrage
+scrape_famma_dhaw()
+
+# Scheduler en arrière-plan
+start_background_scheduler()
+
 if __name__ == '__main__':
-    init_db()
-    # Premier scrape au démarrage
-    logger.info("Starting Famma Dhaw Monitor...")
-    scrape_famma_dhaw()
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False, threaded=True)
