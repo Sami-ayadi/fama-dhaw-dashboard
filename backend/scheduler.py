@@ -1,5 +1,5 @@
 """
-Scheduler - Runs scraper every 5 minutes
+Scheduler - Runs scraper every 1 minute
 """
 import time
 import schedule
@@ -15,13 +15,11 @@ def job():
     logger.info("Running scheduled scrape...")
     scraper.run_scrape()
 
-schedule.every(5).minutes.do(job)
+schedule.every(1).minutes.do(job)
 
 if __name__ == "__main__":
-    # Run once immediately
     job()
-
-    logger.info("Scheduler started - scraping every 5 minutes")
+    logger.info("Scheduler started - scraping every 1 minute")
     while True:
         schedule.run_pending()
         time.sleep(1)
