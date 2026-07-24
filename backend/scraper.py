@@ -1,6 +1,7 @@
 """
 Famma Dhaw Scraper - Collecte des donnees de coupures d'electricite en Tunisie
 """
+import os
 import requests
 import sqlite3
 import random
