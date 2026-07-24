@@ -1,0 +1,1418 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Famma Dhaw Monitor - Coupures d'electricite Tunisie</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=Noto+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+    <style>
+        :root {
+            --bg-primary: #0a0e17;
+            --bg-secondary: #111827;
+            --bg-card: #1a2233;
+            --bg-hover: #243044;
+            --border: #2a3449;
+            --text-primary: #e2e8f0;
+            --text-secondary: #94a3b8;
+            --text-muted: #64748b;
+            --red: #e8392b;
+            --red-dim: #7c2d2d;
+            --green: #1db954;
+            --green-dim: #166534;
+            --yellow: #f5c518;
+            --yellow-dim: #854d0e;
+            --blue: #3b82f6;
+            --blue-dim: #1e3a5f;
+            --orange: #f97316;
+        }
+
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            font-family: 'Noto Sans', sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            min-height: 100vh;
+            overflow-x: hidden;
+        }
+
+        .mono { font-family: 'IBM Plex Mono', monospace; }
+
+        /* Header */
+        .header {
+            background: var(--bg-secondary);
+            border-bottom: 1px solid var(--border);
+            padding: 1rem 2rem;
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            backdrop-filter: blur(10px);
+        }
+
+        .header-content {
+            max-width: 1400px;
+            margin: 0 auto;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 1rem;
+        }
+
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+        }
+
+        .logo-icon {
+            width: 36px; height: 36px;
+            background: linear-gradient(135deg, var(--yellow), var(--orange));
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 1.2rem;
+        }
+
+        .logo h1 {
+            font-size: 1.25rem;
+            font-weight: 700;
+            color: var(--text-primary);
+        }
+
+        .logo span {
+            color: var(--yellow);
+        }
+
+        .live-indicator {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-size: 0.8rem;
+            color: var(--green);
+        }
+
+        .live-dot {
+            width: 8px; height: 8px;
+            background: var(--green);
+            border-radius: 50%;
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; transform: scale(1); }
+            50% { opacity: 0.5; transform: scale(1.2); }
+        }
+
+        .nav-tabs {
+            display: flex;
+            gap: 0.25rem;
+            background: var(--bg-card);
+            border-radius: 8px;
+            padding: 0.25rem;
+        }
+
+        .nav-tab {
+            padding: 0.5rem 1rem;
+            border: none;
+            background: transparent;
+            color: var(--text-secondary);
+            font-size: 0.85rem;
+            font-weight: 500;
+            cursor: pointer;
+            border-radius: 6px;
+            transition: all 0.2s;
+            font-family: 'Noto Sans', sans-serif;
+        }
+
+        .nav-tab:hover { color: var(--text-primary); }
+        .nav-tab.active { background: var(--blue); color: white; }
+
+        /* Alert Banner */
+        .alert-banner {
+            background: linear-gradient(90deg, var(--red-dim), var(--red));
+            padding: 0.75rem 2rem;
+            display: none;
+            align-items: center;
+            justify-content: center;
+            gap: 0.75rem;
+            font-weight: 600;
+            font-size: 0.9rem;
+            animation: slideDown 0.3s ease;
+        }
+
+        .alert-banner.show { display: flex; }
+
+        @keyframes slideDown {
+            from { transform: translateY(-100%); }
+            to { transform: translateY(0); }
+        }
+
+        /* Main Content */
+        .main {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 1.5rem 2rem;
+        }
+
+        .page { display: none; }
+        .page.active { display: block; }
+
+        /* KPI Cards */
+        .kpi-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1rem;
+            margin-bottom: 1.5rem;
+        }
+
+        .kpi-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 1.25rem;
+            transition: transform 0.2s, border-color 0.2s;
+        }
+
+        .kpi-card:hover {
+            transform: translateY(-2px);
+            border-color: var(--blue);
+        }
+
+        .kpi-label {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            margin-bottom: 0.5rem;
+        }
+
+        .kpi-value {
+            font-size: 2rem;
+            font-weight: 700;
+            font-family: 'IBM Plex Mono', monospace;
+        }
+
+        .kpi-value.cut { color: var(--red); }
+        .kpi-value.ok { color: var(--green); }
+        .kpi-value.warn { color: var(--yellow); }
+        .kpi-value.info { color: var(--blue); }
+
+        .kpi-sub {
+            font-size: 0.8rem;
+            color: var(--text-muted);
+            margin-top: 0.25rem;
+        }
+
+        /* Charts Grid */
+        .charts-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(400px, 1fr));
+            gap: 1rem;
+            margin-bottom: 1.5rem;
+        }
+
+        .chart-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 1.25rem;
+        }
+
+        .chart-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1rem;
+        }
+
+        .chart-title {
+            font-size: 0.9rem;
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+
+        .chart-container {
+            position: relative;
+            height: 250px;
+        }
+
+        .chart-container.large {
+            height: 350px;
+        }
+
+        /* Tables */
+        .table-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            overflow: hidden;
+        }
+
+        .table-header {
+            padding: 1rem 1.25rem;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .table-title {
+            font-size: 0.9rem;
+            font-weight: 600;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        th, td {
+            padding: 0.75rem 1.25rem;
+            text-align: left;
+            font-size: 0.85rem;
+        }
+
+        th {
+            background: var(--bg-secondary);
+            color: var(--text-muted);
+            font-weight: 500;
+            text-transform: uppercase;
+            font-size: 0.7rem;
+            letter-spacing: 0.05em;
+        }
+
+        tr { border-bottom: 1px solid var(--border); transition: background 0.2s; }
+        tr:hover { background: var(--bg-hover); }
+        tr:last-child { border-bottom: none; }
+
+        .status-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.35rem;
+            padding: 0.25rem 0.6rem;
+            border-radius: 20px;
+            font-size: 0.75rem;
+            font-weight: 600;
+        }
+
+        .status-badge.cut {
+            background: var(--red-dim);
+            color: var(--red);
+        }
+
+        .status-badge.ok {
+            background: var(--green-dim);
+            color: var(--green);
+        }
+
+        .status-badge.partial {
+            background: var(--yellow-dim);
+            color: var(--yellow);
+        }
+
+        .status-dot {
+            width: 6px; height: 6px;
+            border-radius: 50%;
+        }
+
+        /* Priority Section */
+        .priority-section {
+            background: linear-gradient(135deg, var(--yellow-dim), var(--bg-card));
+            border: 1px solid var(--yellow);
+            border-radius: 12px;
+            padding: 1.25rem;
+            margin-bottom: 1.5rem;
+        }
+
+        .priority-header {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            margin-bottom: 1rem;
+            color: var(--yellow);
+            font-weight: 600;
+        }
+
+        .priority-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 0.75rem;
+        }
+
+        .priority-item {
+            background: var(--bg-card);
+            border-radius: 8px;
+            padding: 0.75rem 1rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .priority-name {
+            font-size: 0.85rem;
+            font-weight: 500;
+        }
+
+        /* Search */
+        .search-bar {
+            width: 100%;
+            max-width: 400px;
+            padding: 0.6rem 1rem;
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            color: var(--text-primary);
+            font-size: 0.85rem;
+            outline: none;
+            transition: border-color 0.2s;
+        }
+
+        .search-bar:focus { border-color: var(--blue); }
+
+        .search-bar::placeholder { color: var(--text-muted); }
+
+        /* Filter buttons */
+        .filter-group {
+            display: flex;
+            gap: 0.5rem;
+            flex-wrap: wrap;
+        }
+
+        .filter-btn {
+            padding: 0.4rem 0.8rem;
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            color: var(--text-secondary);
+            font-size: 0.8rem;
+            cursor: pointer;
+            transition: all 0.2s;
+            font-family: 'Noto Sans', sans-serif;
+        }
+
+        .filter-btn:hover { border-color: var(--blue); color: var(--text-primary); }
+        .filter-btn.active { background: var(--blue); border-color: var(--blue); color: white; }
+
+        /* Forecast Section */
+        .forecast-container {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 1.5rem;
+        }
+
+        .forecast-timeline {
+            display: flex;
+            gap: 0.5rem;
+            margin-top: 1rem;
+            overflow-x: auto;
+            padding-bottom: 0.5rem;
+        }
+
+        .forecast-hour {
+            min-width: 80px;
+            padding: 0.75rem;
+            border-radius: 8px;
+            text-align: center;
+            border: 1px solid var(--border);
+            transition: all 0.2s;
+        }
+
+        .forecast-hour.cut {
+            background: var(--red-dim);
+            border-color: var(--red);
+        }
+
+        .forecast-hour.ok {
+            background: var(--green-dim);
+            border-color: var(--green);
+        }
+
+        .forecast-hour .hour-label {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            margin-bottom: 0.25rem;
+        }
+
+        .forecast-hour .hour-prob {
+            font-size: 1.1rem;
+            font-weight: 700;
+            font-family: 'IBM Plex Mono', monospace;
+        }
+
+        .forecast-hour .hour-status {
+            font-size: 0.7rem;
+            margin-top: 0.25rem;
+            text-transform: uppercase;
+            font-weight: 600;
+        }
+
+        /* Report */
+        .report-card {
+            background: var(--bg-card);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 1.5rem;
+            margin-bottom: 1rem;
+        }
+
+        .report-severity {
+            display: inline-block;
+            padding: 0.4rem 1rem;
+            border-radius: 20px;
+            font-weight: 700;
+            font-size: 0.85rem;
+            margin-bottom: 1rem;
+        }
+
+        .report-severity.critique { background: var(--red-dim); color: var(--red); }
+        .report-severity.elevee { background: var(--orange); color: white; }
+        .report-severity.moderée { background: var(--yellow-dim); color: var(--yellow); }
+        .report-severity.faible { background: var(--green-dim); color: var(--green); }
+
+        .recommendation-list {
+            list-style: none;
+            margin-top: 1rem;
+        }
+
+        .recommendation-list li {
+            padding: 0.5rem 0;
+            padding-left: 1.5rem;
+            position: relative;
+            font-size: 0.9rem;
+            color: var(--text-secondary);
+        }
+
+        .recommendation-list li::before {
+            content: "▸";
+            position: absolute;
+            left: 0;
+            color: var(--blue);
+        }
+
+        /* Alerts Panel */
+        .alert-item {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            padding: 0.75rem 1rem;
+            border-radius: 8px;
+            margin-bottom: 0.5rem;
+            border-left: 3px solid;
+        }
+
+        .alert-item.critical { background: var(--red-dim); border-left-color: var(--red); }
+        .alert-item.high { background: rgba(249, 115, 22, 0.15); border-left-color: var(--orange); }
+        .alert-item.priority { background: var(--yellow-dim); border-left-color: var(--yellow); }
+
+        .alert-time {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            white-space: nowrap;
+        }
+
+        .alert-message {
+            flex: 1;
+            font-size: 0.85rem;
+        }
+
+        /* Buttons */
+        .btn {
+            padding: 0.6rem 1.2rem;
+            border: none;
+            border-radius: 8px;
+            font-size: 0.85rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+            font-family: 'Noto Sans', sans-serif;
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .btn-primary { background: var(--blue); color: white; }
+        .btn-primary:hover { background: #2563eb; }
+
+        .btn-secondary { background: var(--bg-hover); color: var(--text-primary); border: 1px solid var(--border); }
+        .btn-secondary:hover { border-color: var(--blue); }
+
+        .btn-danger { background: var(--red-dim); color: var(--red); border: 1px solid var(--red); }
+        .btn-danger:hover { background: var(--red); color: white; }
+
+        /* Loading */
+        .skeleton {
+            background: linear-gradient(90deg, var(--bg-card) 25%, var(--bg-hover) 50%, var(--bg-card) 75%);
+            background-size: 200% 100%;
+            animation: shimmer 1.5s infinite;
+            border-radius: 4px;
+        }
+
+        @keyframes shimmer {
+            0% { background-position: 200% 0; }
+            100% { background-position: -200% 0; }
+        }
+
+        /* Responsive */
+        @media (max-width: 768px) {
+            .header-content { flex-direction: column; align-items: stretch; }
+            .nav-tabs { overflow-x: auto; }
+            .main { padding: 1rem; }
+            .charts-grid { grid-template-columns: 1fr; }
+            .kpi-grid { grid-template-columns: repeat(2, 1fr); }
+            .chart-container { height: 200px; }
+        }
+
+        /* Scrollbar */
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: var(--bg-primary); }
+        ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+        ::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+
+        /* Heatmap */
+        .heatmap-grid {
+            display: grid;
+            grid-template-columns: 120px repeat(24, 1fr);
+            gap: 1px;
+            background: var(--border);
+            border-radius: 8px;
+            overflow: hidden;
+            font-size: 0.65rem;
+        }
+
+        .heatmap-cell {
+            padding: 0.35rem 0.2rem;
+            text-align: center;
+            font-family: 'IBM Plex Mono', monospace;
+            min-height: 28px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .heatmap-cell.header {
+            background: var(--bg-secondary);
+            color: var(--text-muted);
+            font-weight: 600;
+        }
+
+        .heatmap-cell.gov {
+            background: var(--bg-secondary);
+            color: var(--text-primary);
+            font-weight: 500;
+            text-align: left;
+            padding-left: 0.5rem;
+            font-size: 0.7rem;
+        }
+
+        .heatmap-cell.data { transition: opacity 0.2s; }
+        .heatmap-cell.data:hover { opacity: 0.8; cursor: pointer; }
+
+        /* Tooltip */
+        .tooltip {
+            position: absolute;
+            background: var(--bg-secondary);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 0.5rem 0.75rem;
+            font-size: 0.8rem;
+            z-index: 1000;
+            pointer-events: none;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+        }
+    </style>
+</head>
+<body>
+    <div class="alert-banner" id="alertBanner">
+        <span>⚠️</span>
+        <span id="alertText"></span>
+    </div>
+
+    <header class="header">
+        <div class="header-content">
+            <div class="logo">
+                <div class="logo-icon">⚡</div>
+                <div>
+                    <h1>Famma Dhaw <span>Monitor</span></h1>
+                    <div style="font-size: 0.7rem; color: var(--text-muted);">Coupures d'electricite - Tunisie</div>
+                </div>
+            </div>
+            <div class="live-indicator">
+                <div class="live-dot"></div>
+                <span class="mono" id="lastUpdate">MAJ: --:--</span>
+            </div>
+            <nav class="nav-tabs">
+                <button class="nav-tab active" data-page="live">Live</button>
+                <button class="nav-tab" data-page="analyse">Analyse</button>
+                <button class="nav-tab" data-page="prevision">Prevision</button>
+                <button class="nav-tab" data-page="rapport">Rapport</button>
+                <button class="nav-tab" data-page="alertes">Alertes</button>
+            </nav>
+        </div>
+    </header>
+
+    <main class="main">
+        <!-- PAGE: LIVE -->
+        <div class="page active" id="page-live">
+            <div class="kpi-grid">
+                <div class="kpi-card">
+                    <div class="kpi-label">Zones Coupees</div>
+                    <div class="kpi-value cut mono" id="kpiCut">--</div>
+                    <div class="kpi-sub" id="kpiCutSub">sur -- zones</div>
+                </div>
+                <div class="kpi-card">
+                    <div class="kpi-label">Zones OK</div>
+                    <div class="kpi-value ok mono" id="kpiOk">--</div>
+                    <div class="kpi-sub" id="kpiOkSub">--%</div>
+                </div>
+                <div class="kpi-card">
+                    <div class="kpi-label">Signalements Total</div>
+                    <div class="kpi-value info mono" id="kpiReports">--</div>
+                    <div class="kpi-sub">votes citoyens</div>
+                </div>
+                <div class="kpi-card">
+                    <div class="kpi-label">Taux de Coupure</div>
+                    <div class="kpi-value warn mono" id="kpiRate">--%</div>
+                    <div class="kpi-sub" id="kpiRateSub">en temps reel</div>
+                </div>
+            </div>
+
+            <div class="priority-section">
+                <div class="priority-header">
+                    <span>⭐</span> Zones Prioritaires
+                </div>
+                <div class="priority-grid" id="priorityGrid">
+                    <div class="skeleton" style="height: 50px; border-radius: 8px;"></div>
+                    <div class="skeleton" style="height: 50px; border-radius: 8px;"></div>
+                    <div class="skeleton" style="height: 50px; border-radius: 8px;"></div>
+                    <div class="skeleton" style="height: 50px; border-radius: 8px;"></div>
+                </div>
+            </div>
+
+            <div class="charts-grid">
+                <div class="chart-card">
+                    <div class="chart-header">
+                        <span class="chart-title">Repartition des zones</span>
+                    </div>
+                    <div class="chart-container">
+                        <canvas id="donutChart"></canvas>
+                    </div>
+                </div>
+                <div class="chart-card">
+                    <div class="chart-header">
+                        <span class="chart-title">Top 10 - Plus coupees (24h)</span>
+                    </div>
+                    <div class="chart-container">
+                        <canvas id="topCutChart"></canvas>
+                    </div>
+                </div>
+            </div>
+
+            <div class="table-card">
+                <div class="table-header">
+                    <span class="table-title">Toutes les zones</span>
+                    <div style="display: flex; gap: 0.5rem; align-items: center;">
+                        <input type="text" class="search-bar" id="zoneSearch" placeholder="Rechercher une zone...">
+                        <div class="filter-group">
+                            <button class="filter-btn active" data-filter="all">Tout</button>
+                            <button class="filter-btn" data-filter="COUPE">Coupe</button>
+                            <button class="filter-btn" data-filter="OK">OK</button>
+                        </div>
+                    </div>
+                </div>
+                <div style="overflow-x: auto;">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Zone</th>
+                                <th>Gouvernorat</th>
+                                <th>Statut</th>
+                                <th class="mono">Sombre</th>
+                                <th class="mono">Lumiere</th>
+                                <th class="mono">Derniere MAJ</th>
+                            </tr>
+                        </thead>
+                        <tbody id="zonesTable">
+                            <tr><td colspan="6" style="text-align: center; color: var(--text-muted); padding: 2rem;">Chargement...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- PAGE: ANALYSE -->
+        <div class="page" id="page-analyse">
+            <div class="charts-grid">
+                <div class="chart-card" style="grid-column: 1 / -1;">
+                    <div class="chart-header">
+                        <span class="chart-title">Evolution temporelle (24h)</span>
+                    </div>
+                    <div class="chart-container large">
+                        <canvas id="timelineChart"></canvas>
+                    </div>
+                </div>
+            </div>
+
+            <div class="charts-grid">
+                <div class="chart-card">
+                    <div class="chart-header">
+                        <span class="chart-title">Top 10 - Moins coupees (24h)</span>
+                    </div>
+                    <div class="chart-container">
+                        <canvas id="topOkChart"></canvas>
+                    </div>
+                </div>
+                <div class="chart-card">
+                    <div class="chart-header">
+                        <span class="chart-title">Coupures par heure</span>
+                    </div>
+                    <div class="chart-container">
+                        <canvas id="hourlyChart"></canvas>
+                    </div>
+                </div>
+            </div>
+
+            <div class="chart-card" style="margin-bottom: 1.5rem;">
+                <div class="chart-header">
+                    <span class="chart-title">Pointe (14h-22h) vs Creuse</span>
+                </div>
+                <div class="chart-container">
+                    <canvas id="peakChart"></canvas>
+                </div>
+            </div>
+
+            <div class="chart-card">
+                <div class="chart-header">
+                    <span class="chart-title">Heatmap Gouvernorat x Heure (24h)</span>
+                </div>
+                <div id="heatmapContainer" style="overflow-x: auto; padding: 0.5rem;">
+                    <div style="text-align: center; color: var(--text-muted); padding: 2rem;">Chargement...</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- PAGE: PREVISION -->
+        <div class="page" id="page-prevision">
+            <div class="forecast-container">
+                <div class="chart-header">
+                    <div>
+                        <span class="chart-title">Prevision Route Menzel Chaker</span>
+                        <div style="font-size: 0.8rem; color: var(--text-muted); margin-top: 0.25rem;">
+                            Modele: Regression lineaire ponderee (EWMA a=0.3) + ajustement saisonnier
+                        </div>
+                    </div>
+                    <div class="filter-group">
+                        <button class="filter-btn active" data-forecast="Route Menzel Chaker">Menzel Chaker</button>
+                        <button class="filter-btn" data-forecast="Sfax Ville">Sfax Ville</button>
+                        <button class="filter-btn" data-forecast="Kairouan Nord">Kairouan Nord</button>
+                        <button class="filter-btn" data-forecast="Gabes Medina">Gabes Medina</button>
+                    </div>
+                </div>
+                <div class="forecast-timeline" id="forecastTimeline">
+                    <div style="text-align: center; color: var(--text-muted); padding: 2rem;">Chargement...</div>
+                </div>
+                <div style="margin-top: 1.5rem;">
+                    <div class="chart-container large">
+                        <canvas id="forecastChart"></canvas>
+                    </div>
+                </div>
+                <div style="margin-top: 1rem; display: flex; gap: 1rem; flex-wrap: wrap;">
+                    <div style="background: var(--bg-secondary); padding: 0.75rem 1rem; border-radius: 8px;">
+                        <div style="font-size: 0.7rem; color: var(--text-muted);">Confiance</div>
+                        <div class="mono" style="font-weight: 600;" id="forecastConfidence">±15%</div>
+                    </div>
+                    <div style="background: var(--bg-secondary); padding: 0.75rem 1rem; border-radius: 8px;">
+                        <div style="font-size: 0.7rem; color: var(--text-muted);">Estimation prochaine coupure</div>
+                        <div class="mono" style="font-weight: 600;" id="forecastNext">-- min</div>
+                    </div>
+                    <div style="background: var(--bg-secondary); padding: 0.75rem 1rem; border-radius: 8px;">
+                        <div style="font-size: 0.7rem; color: var(--text-muted);">Heures coupees (24h)</div>
+                        <div class="mono" style="font-weight: 600;" id="forecastHours">--h</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- PAGE: RAPPORT -->
+        <div class="page" id="page-rapport">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
+                <h2 style="font-size: 1.1rem;">Rapport Quotidien</h2>
+                <div style="display: flex; gap: 0.5rem;">
+                    <button class="btn btn-secondary" onclick="generateReport()">🔄 Generer</button>
+                    <button class="btn btn-primary" onclick="exportCSV()">📥 Export CSV</button>
+                </div>
+            </div>
+            <div id="reportContent">
+                <div class="report-card">
+                    <div class="skeleton" style="height: 30px; width: 150px; margin-bottom: 1rem;"></div>
+                    <div class="skeleton" style="height: 20px; width: 80%; margin-bottom: 0.5rem;"></div>
+                    <div class="skeleton" style="height: 20px; width: 60%;"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- PAGE: ALERTES -->
+        <div class="page" id="page-alertes">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
+                <h2 style="font-size: 1.1rem;">Historique des Alertes</h2>
+                <button class="btn btn-danger" onclick="clearAlerts()">Effacer tout</button>
+            </div>
+            <div id="alertsList">
+                <div style="text-align: center; color: var(--text-muted); padding: 3rem;">Chargement...</div>
+            </div>
+        </div>
+    </main>
+
+    <script>
+        // ==================== CONFIG ====================
+        const API_BASE = window.location.hostname === 'localhost' ? 'http://localhost:8000' : '';
+        let currentPage = 'live';
+        let charts = {};
+        let zonesData = [];
+        let currentFilter = 'all';
+        let currentForecastZone = 'Route Menzel Chaker';
+
+        // ==================== NAVIGATION ====================
+        document.querySelectorAll('.nav-tab').forEach(tab => {
+            tab.addEventListener('click', () => {
+                document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
+                document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+                tab.classList.add('active');
+                const page = tab.dataset.page;
+                document.getElementById(`page-${page}`).classList.add('active');
+                currentPage = page;
+                if (page === 'analyse') loadAnalyseData();
+                if (page === 'prevision') loadForecastData();
+                if (page === 'rapport') loadReport();
+                if (page === 'alertes') loadAlerts();
+            });
+        });
+
+        // ==================== API HELPERS ====================
+        async function api(endpoint) {
+            try {
+                const res = await fetch(`${API_BASE}/api${endpoint}`);
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                return await res.json();
+            } catch (e) {
+                console.error('API Error:', e);
+                return null;
+            }
+        }
+
+        // ==================== LIVE PAGE ====================
+        async function loadLiveData() {
+            const stats = await api('/stats');
+            if (!stats) return;
+
+            document.getElementById('kpiCut').textContent = stats.cut_zones;
+            document.getElementById('kpiCutSub').textContent = `sur ${stats.total_zones} zones`;
+            document.getElementById('kpiOk').textContent = stats.ok_zones;
+            document.getElementById('kpiOkSub').textContent = `${Math.round(stats.ok_zones / stats.total_zones * 100)}%`;
+            document.getElementById('kpiReports').textContent = (stats.total_reports_dark + stats.total_reports_light).toLocaleString();
+            document.getElementById('kpiRate').textContent = `${stats.cut_percentage}%`;
+            document.getElementById('kpiRateSub').textContent = stats.data_source === 'simulation' ? 'donnees simulees' : 'donnees temps reel';
+            document.getElementById('lastUpdate').textContent = `MAJ: ${new Date(stats.last_update).toLocaleTimeString('fr-FR', {hour: '2-digit', minute:'2-digit'})}`;
+
+            // Alert banner
+            const banner = document.getElementById('alertBanner');
+            const alertText = document.getElementById('alertText');
+            if (stats.cut_percentage >= 60) {
+                banner.classList.add('show');
+                alertText.textContent = `ALERTE CRITIQUE: ${stats.cut_percentage}% des zones sont coupees !`;
+            } else if (stats.cut_percentage >= 40) {
+                banner.classList.add('show');
+                alertText.textContent = `Alerte elevee: ${stats.cut_percentage}% des zones coupees`;
+            } else {
+                banner.classList.remove('show');
+            }
+
+            // Priority zones
+            const priority = await api('/priority-zones');
+            if (priority) {
+                const grid = document.getElementById('priorityGrid');
+                grid.innerHTML = priority.priority_zones.map(z => `
+                    <div class="priority-item">
+                        <span class="priority-name">${z.name}</span>
+                        <span class="status-badge ${z.status.toLowerCase()}">
+                            <span class="status-dot" style="background: ${z.status === 'COUPE' ? 'var(--red)' : z.status === 'PARTIEL' ? 'var(--yellow)' : 'var(--green)'}"></span>
+                            ${z.status}
+                        </span>
+                    </div>
+                `).join('');
+            }
+
+            // Zones table
+            const zones = await api('/zones');
+            if (zones) {
+                zonesData = zones.zones;
+                renderZonesTable();
+            }
+
+            // Donut chart
+            renderDonut(stats);
+
+            // Top cut chart
+            const topCut = await api('/top-cut?limit=10');
+            if (topCut) renderTopCut(topCut.top_cut);
+        }
+
+        function renderZonesTable() {
+            const search = document.getElementById('zoneSearch').value.toLowerCase();
+            const tbody = document.getElementById('zonesTable');
+
+            let filtered = zonesData;
+            if (search) filtered = filtered.filter(z => z.name.toLowerCase().includes(search));
+            if (currentFilter !== 'all') filtered = filtered.filter(z => z.status === currentFilter);
+
+            if (filtered.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="6" style="text-align: center; color: var(--text-muted); padding: 2rem;">Aucune zone trouvee</td></tr>';
+                return;
+            }
+
+            tbody.innerHTML = filtered.map(z => `
+                <tr>
+                    <td><strong>${z.name}</strong></td>
+                    <td>${z.governorate}</td>
+                    <td>
+                        <span class="status-badge ${z.status.toLowerCase()}">
+                            <span class="status-dot" style="background: ${z.status === 'COUPE' ? 'var(--red)' : z.status === 'PARTIEL' ? 'var(--yellow)' : 'var(--green)'}"></span>
+                            ${z.status}
+                        </span>
+                    </td>
+                    <td class="mono">${z.reports_dark}</td>
+                    <td class="mono">${z.reports_light}</td>
+                    <td class="mono" style="font-size: 0.75rem; color: var(--text-muted);">${new Date(z.last_updated).toLocaleTimeString('fr-FR', {hour:'2-digit', minute:'2-digit'})}</td>
+                </tr>
+            `).join('');
+        }
+
+        document.getElementById('zoneSearch').addEventListener('input', renderZonesTable);
+        document.querySelectorAll('.filter-btn[data-filter]').forEach(btn => {
+            btn.addEventListener('click', () => {
+                document.querySelectorAll('.filter-btn[data-filter]').forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                currentFilter = btn.dataset.filter;
+                renderZonesTable();
+            });
+        });
+
+        // ==================== CHARTS ====================
+        function renderDonut(stats) {
+            const ctx = document.getElementById('donutChart').getContext('2d');
+            if (charts.donut) charts.donut.destroy();
+            charts.donut = new Chart(ctx, {
+                type: 'doughnut',
+                data: {
+                    labels: ['Coupe', 'Partiel', 'OK'],
+                    datasets: [{
+                        data: [stats.cut_zones, stats.partial_zones, stats.ok_zones],
+                        backgroundColor: ['#e8392b', '#f5c518', '#1db954'],
+                        borderWidth: 0,
+                        hoverOffset: 8
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: { position: 'bottom', labels: { color: '#94a3b8', padding: 15, font: { size: 11 } } }
+                    },
+                    cutout: '65%'
+                }
+            });
+        }
+
+        function renderTopCut(data) {
+            const ctx = document.getElementById('topCutChart').getContext('2d');
+            if (charts.topCut) charts.topCut.destroy();
+            charts.topCut = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: data.map(d => d.zone_name),
+                    datasets: [{
+                        label: 'Heures coupees',
+                        data: data.map(d => d.cut_hours),
+                        backgroundColor: '#e8392b',
+                        borderRadius: 4
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    indexAxis: 'y',
+                    plugins: { legend: { display: false } },
+                    scales: {
+                        x: { grid: { color: '#2a3449' }, ticks: { color: '#64748b' } },
+                        y: { grid: { display: false }, ticks: { color: '#94a3b8', font: { size: 10 } } }
+                    }
+                }
+            });
+        }
+
+        // ==================== ANALYSE PAGE ====================
+        async function loadAnalyseData() {
+            const timeline = await api('/timeline?hours=24');
+            if (timeline) renderTimeline(timeline.timeline);
+
+            const topOk = await api('/top-ok?limit=10');
+            if (topOk) renderTopOk(topOk.top_ok);
+
+            const hourly = await api('/hourly-distribution?hours=24');
+            if (hourly) renderHourly(hourly.hourly);
+
+            const peak = await api('/peak-vs-offpeak?hours=24');
+            if (peak) renderPeak(peak);
+
+            const heatmap = await api('/heatmap?hours=24');
+            if (heatmap) renderHeatmap(heatmap.heatmap);
+        }
+
+        function renderTimeline(data) {
+            const ctx = document.getElementById('timelineChart').getContext('2d');
+            if (charts.timeline) charts.timeline.destroy();
+            charts.timeline = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: data.map(d => d.hour.slice(11, 16)),
+                    datasets: [{
+                        label: 'Zones coupees',
+                        data: data.map(d => d.cut_count),
+                        borderColor: '#e8392b',
+                        backgroundColor: 'rgba(232, 57, 43, 0.1)',
+                        fill: true,
+                        tension: 0.4,
+                        pointRadius: 3,
+                        pointBackgroundColor: '#e8392b'
+                    }, {
+                        label: 'Total zones',
+                        data: data.map(d => d.total_zones),
+                        borderColor: '#3b82f6',
+                        borderDash: [5, 5],
+                        pointRadius: 0,
+                        fill: false
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    interaction: { intersect: false, mode: 'index' },
+                    plugins: { legend: { labels: { color: '#94a3b8' } } },
+                    scales: {
+                        x: { grid: { color: '#2a3449' }, ticks: { color: '#64748b' } },
+                        y: { grid: { color: '#2a3449' }, ticks: { color: '#64748b' } }
+                    }
+                }
+            });
+        }
+
+        function renderTopOk(data) {
+            const ctx = document.getElementById('topOkChart').getContext('2d');
+            if (charts.topOk) charts.topOk.destroy();
+            charts.topOk = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: data.map(d => d.zone_name),
+                    datasets: [{
+                        label: 'Heures coupees',
+                        data: data.map(d => d.cut_hours),
+                        backgroundColor: '#1db954',
+                        borderRadius: 4
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    indexAxis: 'y',
+                    plugins: { legend: { display: false } },
+                    scales: {
+                        x: { grid: { color: '#2a3449' }, ticks: { color: '#64748b' } },
+                        y: { grid: { display: false }, ticks: { color: '#94a3b8', font: { size: 10 } } }
+                    }
+                }
+            });
+        }
+
+        function renderHourly(data) {
+            const ctx = document.getElementById('hourlyChart').getContext('2d');
+            if (charts.hourly) charts.hourly.destroy();
+
+            const hours = Array.from({length: 24}, (_, i) => `${i}h`);
+            const values = Array(24).fill(0);
+            data.forEach(d => values[d.hour] = d.cut_count);
+
+            charts.hourly = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: hours,
+                    datasets: [{
+                        label: 'Coupures',
+                        data: values,
+                        backgroundColor: values.map((_, i) => (i >= 14 && i <= 22) ? '#f5c518' : '#3b82f6'),
+                        borderRadius: 3
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: { legend: { display: false } },
+                    scales: {
+                        x: { grid: { color: '#2a3449' }, ticks: { color: '#64748b', font: { size: 10 } } },
+                        y: { grid: { color: '#2a3449' }, ticks: { color: '#64748b' } }
+                    }
+                }
+            });
+        }
+
+        function renderPeak(data) {
+            const ctx = document.getElementById('peakChart').getContext('2d');
+            if (charts.peak) charts.peak.destroy();
+            charts.peak = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: ['Pointe (14h-22h)', 'Creuse (reste)'],
+                    datasets: [{
+                        label: 'Taux de coupure (%)',
+                        data: [data.peak.ratio, data.offpeak.ratio],
+                        backgroundColor: ['#f5c518', '#3b82f6'],
+                        borderRadius: 8,
+                        barThickness: 60
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: { legend: { display: false } },
+                    scales: {
+                        x: { grid: { display: false }, ticks: { color: '#94a3b8', font: { size: 12 } } },
+                        y: { grid: { color: '#2a3449' }, ticks: { color: '#64748b', callback: v => v + '%' } }
+                    }
+                }
+            });
+        }
+
+        function renderHeatmap(data) {
+            const container = document.getElementById('heatmapContainer');
+            const govData = {};
+            data.forEach(d => {
+                if (!govData[d.governorate]) govData[d.governorate] = {};
+                govData[d.governorate][d.hour] = d.ratio;
+            });
+
+            const hours = Array.from({length: 24}, (_, i) => String(i).padStart(2, '0'));
+            const govNames = Object.keys(govData).sort();
+
+            let html = '<div class="heatmap-grid">';
+            html += '<div class="heatmap-cell header">Gov</div>';
+            hours.forEach(h => html += `<div class="heatmap-cell header">${h}</div>`);
+
+            govNames.forEach(gov => {
+                html += `<div class="heatmap-cell gov">${gov}</div>`;
+                hours.forEach(h => {
+                    const ratio = govData[gov][h] || 0;
+                    const intensity = Math.min(1, ratio);
+                    const color = `rgba(232, 57, 43, ${intensity})`;
+                    html += `<div class="heatmap-cell data" style="background: ${color}; color: ${intensity > 0.5 ? 'white' : '#94a3b8'}" title="${gov} ${h}h: ${(ratio*100).toFixed(1)}%">${(ratio*100).toFixed(0)}</div>`;
+                });
+            });
+
+            html += '</div>';
+            container.innerHTML = html;
+        }
+
+        // ==================== PREVISION PAGE ====================
+        async function loadForecastData() {
+            const forecast = await api(`/forecast/${encodeURIComponent(currentForecastZone)}?hours=6`);
+            if (!forecast) return;
+
+            const timeline = document.getElementById('forecastTimeline');
+            timeline.innerHTML = forecast.forecast.map(f => `
+                <div class="forecast-hour ${f.predicted_status.toLowerCase()}">
+                    <div class="hour-label">${String(f.hour).padStart(2,'0')}h</div>
+                    <div class="hour-prob" style="color: ${f.predicted_status === 'COUPE' ? 'var(--red)' : 'var(--green)'}">${f.probability}%</div>
+                    <div class="hour-status">${f.predicted_status}</div>
+                </div>
+            `).join('');
+
+            // Forecast chart
+            const ctx = document.getElementById('forecastChart').getContext('2d');
+            if (charts.forecast) charts.forecast.destroy();
+
+            const now = new Date().getHours();
+            const labels = forecast.forecast.map((f, i) => {
+                if (i === 0) return 'Maintenant';
+                return `+${i}h`;
+            });
+
+            charts.forecast = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: labels,
+                    datasets: [{
+                        label: 'Probabilite de coupure (%)',
+                        data: forecast.forecast.map(f => f.probability),
+                        borderColor: '#f5c518',
+                        backgroundColor: 'rgba(245, 197, 24, 0.15)',
+                        fill: true,
+                        tension: 0.4,
+                        pointRadius: 5,
+                        pointBackgroundColor: '#f5c518'
+                    }, {
+                        label: 'Seuil critique (50%)',
+                        data: Array(6).fill(50),
+                        borderColor: '#e8392b',
+                        borderDash: [5, 5],
+                        pointRadius: 0,
+                        fill: false
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: { labels: { color: '#94a3b8' } },
+                        annotation: {
+                            annotations: {
+                                line1: {
+                                    type: 'line',
+                                    yMin: 50,
+                                    yMax: 50,
+                                    borderColor: '#e8392b',
+                                    borderWidth: 2,
+                                    borderDash: [5, 5]
+                                }
+                            }
+                        }
+                    },
+                    scales: {
+                        x: { grid: { color: '#2a3449' }, ticks: { color: '#64748b' } },
+                        y: { grid: { color: '#2a3449' }, ticks: { color: '#64748b', callback: v => v + '%' }, min: 0, max: 100 }
+                    }
+                }
+            });
+
+            document.getElementById('forecastConfidence').textContent = forecast.forecast[0]?.confidence === 'medium' ? '±15%' : '±22%';
+
+            // Estimate next outage
+            const nextCut = forecast.forecast.find(f => f.predicted_status === 'COUPE');
+            document.getElementById('forecastNext').textContent = nextCut ? `${forecast.forecast.indexOf(nextCut) * 60} min` : '> 6h';
+
+            // Hours cut in last 24h
+            const history = await api(`/history/${encodeURIComponent(currentForecastZone)}?hours=24`);
+            if (history) {
+                const cutHours = history.history.filter(h => h.status === 'COUPE').length;
+                document.getElementById('forecastHours').textContent = `${cutHours}h`;
+            }
+        }
+
+        document.querySelectorAll('.filter-btn[data-forecast]').forEach(btn => {
+            btn.addEventListener('click', () => {
+                document.querySelectorAll('.filter-btn[data-forecast]').forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                currentForecastZone = btn.dataset.forecast;
+                loadForecastData();
+            });
+        });
+
+        // ==================== RAPPORT PAGE ====================
+        async function loadReport() {
+            const report = await api('/report');
+            if (!report) return;
+
+            const container = document.getElementById('reportContent');
+            container.innerHTML = `
+                <div class="report-card">
+                    <div class="report-severity ${report.severity.toLowerCase()}">${report.severity}</div>
+                    <div style="font-size: 0.8rem; color: var(--text-muted); margin-bottom: 1rem;">
+                        Genere le ${new Date(report.generated_at).toLocaleString('fr-FR')}
+                    </div>
+                    <div class="kpi-grid" style="margin-bottom: 1rem;">
+                        <div class="kpi-card">
+                            <div class="kpi-label">Taux moyen (24h)</div>
+                            <div class="kpi-value mono">${(report.stats_24h.avg_cut_rate * 100).toFixed(1)}%</div>
+                        </div>
+                        <div class="kpi-card">
+                            <div class="kpi-label">Taux max (24h)</div>
+                            <div class="kpi-value cut mono">${(report.stats_24h.max_cut * 100).toFixed(1)}%</div>
+                        </div>
+                        <div class="kpi-card">
+                            <div class="kpi-label">Taux min (24h)</div>
+                            <div class="kpi-value ok mono">${(report.stats_24h.min_cut * 100).toFixed(1)}%</div>
+                        </div>
+                        <div class="kpi-card">
+                            <div class="kpi-label">Coupe actuel</div>
+                            <div class="kpi-value warn mono">${report.current_cut_percentage}%</div>
+                        </div>
+                    </div>
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-bottom: 1rem;">
+                        <div style="background: var(--bg-secondary); padding: 1rem; border-radius: 8px;">
+                            <div style="font-size: 0.75rem; color: var(--text-muted); margin-bottom: 0.5rem;">Pire gouvernorat</div>
+                            <div style="font-weight: 600;">${report.worst_governorate.governorate || 'N/A'}</div>
+                            <div class="mono" style="color: var(--red); font-size: 0.85rem;">${(report.worst_governorate.rate * 100).toFixed(1)}% de coupures</div>
+                        </div>
+                        <div style="background: var(--bg-secondary); padding: 1rem; border-radius: 8px;">
+                            <div style="font-size: 0.75rem; color: var(--text-muted); margin-bottom: 0.5rem;">Meilleur gouvernorat</div>
+                            <div style="font-weight: 600;">${report.best_governorate.governorate || 'N/A'}</div>
+                            <div class="mono" style="color: var(--green); font-size: 0.85rem;">${(report.best_governorate.rate * 100).toFixed(1)}% de coupures</div>
+                        </div>
+                    </div>
+                    <h3 style="font-size: 0.9rem; margin-bottom: 0.5rem;">Recommandations</h3>
+                    <ul class="recommendation-list">
+                        ${report.recommendations.map(r => `<li>${r}</li>`).join('')}
+                    </ul>
+                </div>
+            `;
+        }
+
+        function generateReport() {
+            loadReport();
+        }
+
+        async function exportCSV() {
+            window.open(`${API_BASE}/api/export/csv`, '_blank');
+        }
+
+        // ==================== ALERTES PAGE ====================
+        async function loadAlerts() {
+            const alerts = await api('/alerts?limit=50');
+            if (!alerts) return;
+
+            const container = document.getElementById('alertsList');
+            if (alerts.alerts.length === 0) {
+                container.innerHTML = '<div style="text-align: center; color: var(--text-muted); padding: 3rem;">Aucune alerte</div>';
+                return;
+            }
+
+            container.innerHTML = alerts.alerts.map(a => `
+                <div class="alert-item ${a.severity.toLowerCase()}">
+                    <span class="alert-time mono">${new Date(a.timestamp).toLocaleString('fr-FR', {day:'2-digit', month:'short', hour:'2-digit', minute:'2-digit'})}</span>
+                    <span class="alert-message">${a.message}</span>
+                    <span class="status-badge ${a.type.toLowerCase()}">${a.type}</span>
+                </div>
+            `).join('');
+        }
+
+        function clearAlerts() {
+            document.getElementById('alertsList').innerHTML = '<div style="text-align: center; color: var(--text-muted); padding: 3rem;">Alertes effacees</div>';
+        }
+
+        // ==================== AUTO REFRESH ====================
+        loadLiveData();
+        setInterval(() => {
+            if (currentPage === 'live') loadLiveData();
+        }, 300000); // 5 minutes
+
+        // Initial data load for other pages
+        setTimeout(() => {
+            loadAnalyseData();
+            loadForecastData();
+            loadReport();
+            loadAlerts();
+        }, 1000);
+    </script>
+</body>
+</html>
